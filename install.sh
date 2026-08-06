@@ -125,4 +125,5 @@ fi
 
 echo ""
 echo "Done. Restart Cursor or reload hooks (save hooks.json) if hooks do not fire."
-echo "Logs: ~/.cursor/memory/state/consolidate.log"
+echo "Logs: ~/.cursor/memory/state/capture.log and consolidate.log"
+echo "Doctor: $REPO_DIR/scripts/doctor.sh"

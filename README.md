@@ -166,6 +166,47 @@ See `hooks.fragment.json`. Merged into your existing `~/.cursor/hooks.json`:
 - `stop` → `memory-capture.js`
 - `sessionEnd` → `memory-capture.js`
 
+## Troubleshooting
+
+### Nothing updates after moving the repo
+
+`./install.sh --link` creates symlinks to this repo. **Moving the folder breaks them** — hooks fail silently.
+
+```bash
+cd ~/Documents/code/cursor-memory   # your current path
+./install.sh --link
+./scripts/doctor.sh
+```
+
+### Memory files not growing
+
+Normal chats **do not** auto-save. Capture only runs on **high-signal** user text:
+
+- *"always …"*, *"never …"*, *"remember …"*
+- Corrections: *"use pnpm not npm"*, *"no, do X instead"*
+
+Then:
+
+1. Raw queue: `~/.cursor/memory/raw/pending.jsonl` (one line per capture)
+2. Consolidate runs at **3** pending entries when chat completes
+3. `MEMORY.md` updates only after consolidate
+
+Check hook activity:
+
+```bash
+tail -f ~/.cursor/memory/state/capture.log
+```
+
+If you see `skip: no transcript_path`, transcripts may be disabled in Cursor settings.
+
+### Doctor
+
+```bash
+./scripts/doctor.sh
+```
+
+Checks symlinks, hook smoke test, pending count, recent logs.
+
 ## License
 
 MIT
