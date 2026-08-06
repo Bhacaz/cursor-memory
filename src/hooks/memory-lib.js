@@ -12,6 +12,7 @@ const STATE_DIR = path.join(MEMORY_DIR, 'state');
 const CAPTURE_STATE_PATH = path.join(STATE_DIR, 'last-capture.json');
 const LOCK_PATH = path.join(STATE_DIR, 'consolidate.lock');
 const CONSOLIDATE_LOG = path.join(STATE_DIR, 'consolidate.log');
+const CAPTURE_LOG = path.join(STATE_DIR, 'capture.log');
 const CONSOLIDATE_SKILL = path.join(CURSOR_DIR, 'skills', 'memory-consolidate', 'SKILL.md');
 
 const CONSOLIDATE_THRESHOLD = Number(process.env.MEMORY_CONSOLIDATE_THRESHOLD || 3);
@@ -216,6 +217,12 @@ function logConsolidate(message) {
   fs.appendFileSync(CONSOLIDATE_LOG, line, 'utf8');
 }
 
+function logCapture(message) {
+  ensureDirs();
+  const line = `[${new Date().toISOString()}] ${message}\n`;
+  fs.appendFileSync(CAPTURE_LOG, line, 'utf8');
+}
+
 function shouldDebounceConsolidate() {
   const last = readJson(LAST_CONSOLIDATE_TRIGGER_PATH, { at: 0 });
   return Date.now() - (last.at || 0) < CONSOLIDATE_DEBOUNCE_MS;
@@ -315,9 +322,18 @@ function shouldTriggerConsolidate(input, hookEvent) {
 
 function captureFromTranscript(input, hookEvent) {
   const transcriptPath = resolveTranscriptPath(input);
-  if (!transcriptPath) return 0;
-
   const sessionId = inferSessionId(input);
+
+  if (!transcriptPath) {
+    logCapture(`event=${hookEvent} session=${sessionId} skip: no transcript_path`);
+    return 0;
+  }
+
+  if (!fs.existsSync(transcriptPath)) {
+    logCapture(`event=${hookEvent} session=${sessionId} skip: transcript missing at ${transcriptPath}`);
+    return 0;
+  }
+
   const state = readCaptureState();
   const sessionState = state.sessions[sessionId] || { lastLine: 0 };
   const lines = parseTranscriptLines(transcriptPath);
@@ -325,14 +341,20 @@ function captureFromTranscript(input, hookEvent) {
   const outcome = inferOutcome(input, hookEvent);
 
   let appended = 0;
+  let scanned = 0;
+  let lowScore = 0;
 
   for (let i = sessionState.lastLine; i < lines.length; i += 1) {
     const parsed = parseTranscriptMessage(lines[i]);
     if (!parsed) continue;
     if (parsed.role !== 'user') continue;
 
+    scanned += 1;
     const score = scoreCandidate(parsed.text, parsed.role);
-    if (score < 2) continue;
+    if (score < 2) {
+      lowScore += 1;
+      continue;
+    }
 
     appendRawEntry({
       ts: new Date().toISOString(),
@@ -352,6 +374,21 @@ function captureFromTranscript(input, hookEvent) {
   sessionState.lastCaptureAt = new Date().toISOString();
   state.sessions[sessionId] = sessionState;
   saveCaptureState(state);
+
+  logCapture(
+    `event=${hookEvent} session=${sessionId} lines=${lines.length} `
+    + `new_user_msgs=${scanned} appended=${appended} low_score=${lowScore} pending=${countPending()}`
+  );
+
+  if (shouldTriggerConsolidate(input, hookEvent)) {
+    const pending = countPending();
+    if (pending >= CONSOLIDATE_THRESHOLD) {
+      logCapture(`event=${hookEvent} session=${sessionId} consolidate trigger pending=${pending}`);
+      triggerBackgroundConsolidate();
+    } else {
+      logCapture(`event=${hookEvent} session=${sessionId} consolidate skip pending=${pending}/${CONSOLIDATE_THRESHOLD}`);
+    }
+  }
 
   return appended;
 }
