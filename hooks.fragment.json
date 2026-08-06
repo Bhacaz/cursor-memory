@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      { "command": "node ./hooks/memory-session-start.js" }
+    ],
+    "stop": [
+      { "command": "node ./hooks/memory-capture.js" }
+    ],
+    "sessionEnd": [
+      { "command": "node ./hooks/memory-capture.js" }
+    ]
+  }
+}

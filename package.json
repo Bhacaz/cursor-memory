@@ -1,0 +1,15 @@
+{
+  "name": "cursor-memory",
+  "version": "0.1.0",
+  "description": "Codex-style persistent memory for Cursor via hooks",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "install:cursor": "./install.sh",
+    "uninstall:cursor": "./uninstall.sh",
+    "test:session-start": "node src/hooks/memory-session-start.js"
+  }
+}
