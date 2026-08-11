@@ -1,0 +1,49 @@
+name: Ops / install bug
+description: Hooks, extract/consolidate stuck, doctor failures, install problems
+title: "[ops] "
+labels:
+  - feedback
+  - ops
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Privacy:** No company names, internal URLs, credentials, or real project paths. Logs are OK after sanitization.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - install / uninstall
+        - sessionStart injection
+        - capture cadence
+        - extract (Phase 1)
+        - consolidate (Phase 2)
+        - doctor / scripts
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      placeholder: "extract.log shows skip: no transcript_path after session end"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Agent-written summary only — not raw log dumps
+    validations:
+      required: false

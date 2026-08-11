@@ -32,7 +32,7 @@ for hook in memory-lib.js memory-git.js memory-session-start.js memory-capture.j
   check_link "$CURSOR_DIR/hooks/$hook" "hook $hook"
 done
 
-for skill in memory-read memory-extract memory-consolidate; do
+for skill in memory-read memory-extract memory-consolidate memory-feedback; do
   check_link "$CURSOR_DIR/skills/$skill" "skill $skill"
 done
 

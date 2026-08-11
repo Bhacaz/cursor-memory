@@ -97,7 +97,7 @@ After install, data lives under **`~/.cursor/memory/`** (user-global, not per-pr
     └── last-capture.json
 ```
 
-Skills installed to `~/.cursor/skills/memory-read/`, `memory-extract/`, `memory-consolidate/`.
+Skills installed to `~/.cursor/skills/memory-read/`, `memory-extract/`, `memory-consolidate/`, `memory-feedback/`.
 
 ## What gets captured
 
@@ -185,6 +185,22 @@ Set in shell profile or wrap hook commands if needed.
 
 ```bash
 ./scripts/doctor.sh
+```
+
+## Feedback
+
+File **sanitized** public issues from any agent session:
+
+1. Invoke skill **`memory-feedback`** (or ask agent to file cursor-memory feedback)
+2. Agent runs `npm run feedback`, **rewrites** diagnostics by hand (no company paths, names, or secrets)
+3. You approve preview → `gh issue create` on `Bhacaz/cursor-memory`
+
+Issue templates: **Memory quality** (captures/consolidate) and **Ops / install bug**. Skill blocks company names, internal URLs, ticket IDs, secrets, and real project paths.
+
+Requires `gh auth login`. Override target repo with `MEMORY_FEEDBACK_REPO=owner/repo`.
+
+```bash
+npm run feedback   # raw diagnostics for agent to summarize (do not paste verbatim into issues)
 ```
 
 ## Repository structure

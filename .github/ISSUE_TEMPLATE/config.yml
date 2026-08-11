@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Privacy reminder
+    url: https://github.com/Bhacaz/cursor-memory/blob/main/skills/memory-feedback/SKILL.md
+    about: Issues must not contain company names, internal URLs, proprietary code, or credentials. Use the memory-feedback skill — agent redacts before filing.

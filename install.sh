@@ -47,6 +47,7 @@ MEMORY_SKILLS=(
   memory-read
   memory-extract
   memory-consolidate
+  memory-feedback
 )
 
 install_file() {

@@ -1,0 +1,57 @@
+name: Memory quality
+description: Missed capture, false positive, or consolidate/MEMORY.md issue
+title: "[memory] "
+labels:
+  - feedback
+  - memory-quality
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Privacy:** No company names, internal URLs (Jira/Confluence/Slack/GitLab), proprietary code, credentials, or real project paths. Use generic placeholders (`<project-dir>`, `<service>`).
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - capture-missed — should have saved, did not
+        - capture-noise — saved junk or false positive
+        - consolidate — merge/dedup/MEMORY.md wrong
+        - injection — summary injected wrong or unhelpful
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Generic description only — no proprietary context
+      placeholder: "After a long coding session about X pattern, nothing appeared in raw/stage1/"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: "Should have captured reusable preference about Y"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce (optional)
+      placeholder: "1. Install with --link\n2. Complete N turns in agent chat\n3. Check extract.log"
+    validations:
+      required: false
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics (optional)
+      description: Agent-written summary only — not raw `npm run feedback` output
+    validations:
+      required: false
