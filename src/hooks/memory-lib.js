@@ -4,21 +4,37 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawn } = require('child_process');
+const {
+  prepareWorkspaceDiff,
+  resetGitBaseline,
+  archiveConsolidatedStage1,
+  syncRawMemoriesMd,
+} = require('./memory-git.js');
 
 const CURSOR_DIR = path.join(os.homedir(), '.cursor');
 const MEMORY_DIR = path.join(CURSOR_DIR, 'memory');
-const RAW_PATH = path.join(MEMORY_DIR, 'raw', 'pending.jsonl');
+const STAGE1_DIR = path.join(MEMORY_DIR, 'raw', 'stage1');
+const PROCESSED_DIR = path.join(MEMORY_DIR, 'raw', 'processed');
 const STATE_DIR = path.join(MEMORY_DIR, 'state');
 const CAPTURE_STATE_PATH = path.join(STATE_DIR, 'last-capture.json');
 const LOCK_PATH = path.join(STATE_DIR, 'consolidate.lock');
 const CONSOLIDATE_LOG = path.join(STATE_DIR, 'consolidate.log');
 const CAPTURE_LOG = path.join(STATE_DIR, 'capture.log');
+const EXTRACT_LOG = path.join(STATE_DIR, 'extract.log');
 const CONSOLIDATE_SKILL = path.join(CURSOR_DIR, 'skills', 'memory-consolidate', 'SKILL.md');
+const EXTRACT_SKILL = path.join(CURSOR_DIR, 'skills', 'memory-extract', 'SKILL.md');
 
+const MEMORY_MODEL = process.env.MEMORY_MODEL
+  || process.env.MEMORY_EXTRACT_MODEL
+  || process.env.MEMORY_CONSOLIDATE_MODEL
+  || 'gpt-5.6-luna-medium';
 const CONSOLIDATE_THRESHOLD = Number(process.env.MEMORY_CONSOLIDATE_THRESHOLD || 3);
-const CONSOLIDATE_MODEL = process.env.MEMORY_CONSOLIDATE_MODEL || 'composer-2.5';
 const LOCK_STALE_MS = Number(process.env.MEMORY_LOCK_STALE_MS || 30 * 60 * 1000);
+const EXTRACT_LOCK_STALE_MS = Number(process.env.MEMORY_EXTRACT_LOCK_STALE_MS || 15 * 60 * 1000);
+const EXTRACT_QUEUED_STALE_MS = Number(process.env.MEMORY_EXTRACT_QUEUED_STALE_MS || 20 * 60 * 1000);
 const CONSOLIDATE_DEBOUNCE_MS = Number(process.env.MEMORY_CONSOLIDATE_DEBOUNCE_MS || 60 * 1000);
+const SANDBOX_MODE = process.env.MEMORY_SANDBOX || 'enabled';
 const LAST_CONSOLIDATE_TRIGGER_PATH = path.join(STATE_DIR, 'last-consolidate-trigger.json');
 
 function readStdin() {
@@ -32,7 +48,7 @@ function readStdin() {
 }
 
 function ensureDirs() {
-  fs.mkdirSync(path.join(MEMORY_DIR, 'raw'), { recursive: true });
+  fs.mkdirSync(STAGE1_DIR, { recursive: true });
   fs.mkdirSync(path.join(MEMORY_DIR, 'rollout_summaries'), { recursive: true });
   fs.mkdirSync(STATE_DIR, { recursive: true });
 }
@@ -63,121 +79,12 @@ function readMemorySummary() {
   }
 }
 
-function stripUserQuery(text) {
-  return text
-    .replace(/<timestamp>[\s\S]*?<\/timestamp>\s*/g, '')
-    .replace(/<\/?user_query>\s*/g, '')
-    .trim();
-}
-
-function shouldSkip(text) {
+function shouldSkipTranscript(text) {
   if (!text || text.length < 8) return true;
   if (/password|api[_-]?key|secret|token|credential|BEGIN (RSA |OPENSSH )?PRIVATE KEY/i.test(text)) {
     return true;
   }
-  if (/AGENTS\.md|<skill[\s>]|SKILL\.md|hooks\.json|memory-consolidate/i.test(text)) {
-    return true;
-  }
   return false;
-}
-
-function scoreCandidate(text, role) {
-  if (shouldSkip(text)) return -999;
-
-  let score = 0;
-  const lower = text.toLowerCase();
-
-  if (role === 'user') {
-    if (/\bremember\b|\balways\b|\bnever\b|\bdon't\b|\bstop doing\b|\bmake this a skill\b/.test(lower)) {
-      score += 3;
-    }
-    if (/\binstead\b|\brather\b|\bwrong\b|\bnot that\b|\buse .+ not\b|\bno,?\s/.test(lower)) {
-      score += 2;
-    }
-    if (/\bevery time\b|\bfrom now on\b|\bgoing forward\b/.test(lower)) {
-      score += 2;
-    }
-  }
-
-  if (text.length > 1200) score -= 1;
-  if (text.length < 20) score -= 1;
-
-  return score;
-}
-
-function extractKeywords(text) {
-  const words = text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s/-]/g, ' ')
-    .split(/\s+/)
-    .filter((w) => w.length > 3 && !STOP_WORDS.has(w));
-
-  const unique = [];
-  for (const w of words) {
-    if (!unique.includes(w)) unique.push(w);
-    if (unique.length >= 8) break;
-  }
-  return unique;
-}
-
-const STOP_WORDS = new Set([
-  'this', 'that', 'with', 'from', 'have', 'will', 'would', 'should', 'could',
-  'about', 'when', 'what', 'where', 'which', 'there', 'their', 'them', 'then',
-  'than', 'into', 'just', 'also', 'been', 'being', 'want', 'need', 'like',
-  'make', 'user', 'query', 'assistant', 'please', 'thanks',
-]);
-
-function extractTextBlocks(message) {
-  if (!message?.content) return '';
-  return message.content
-    .filter((block) => block.type === 'text' && typeof block.text === 'string')
-    .map((block) => block.text)
-    .join('\n');
-}
-
-function parseTranscriptLines(transcriptPath) {
-  try {
-    const raw = fs.readFileSync(transcriptPath, 'utf8');
-    return raw.split('\n').filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-function parseTranscriptMessage(line) {
-  try {
-    const obj = JSON.parse(line);
-    if (obj.type === 'turn_ended') return null;
-    if (!obj.role || !obj.message) return null;
-    const text = stripUserQuery(extractTextBlocks(obj.message));
-    if (!text) return null;
-    return { role: obj.role, text };
-  } catch {
-    return null;
-  }
-}
-
-function readCaptureState() {
-  return readJson(CAPTURE_STATE_PATH, { sessions: {} });
-}
-
-function saveCaptureState(state) {
-  writeJsonAtomic(CAPTURE_STATE_PATH, state);
-}
-
-function countPending() {
-  try {
-    const raw = fs.readFileSync(RAW_PATH, 'utf8').trim();
-    if (!raw) return 0;
-    return raw.split('\n').filter(Boolean).length;
-  } catch {
-    return 0;
-  }
-}
-
-function appendRawEntry(entry) {
-  ensureDirs();
-  fs.appendFileSync(RAW_PATH, `${JSON.stringify(entry)}\n`, 'utf8');
 }
 
 function resolveCursorBinary() {
@@ -211,16 +118,22 @@ function clearLock() {
   try { fs.unlinkSync(LOCK_PATH); } catch { /* ignore */ }
 }
 
-function logConsolidate(message) {
+function logLine(logPath, message) {
   ensureDirs();
   const line = `[${new Date().toISOString()}] ${message}\n`;
-  fs.appendFileSync(CONSOLIDATE_LOG, line, 'utf8');
+  fs.appendFileSync(logPath, line, 'utf8');
+}
+
+function logConsolidate(message) {
+  logLine(CONSOLIDATE_LOG, message);
 }
 
 function logCapture(message) {
-  ensureDirs();
-  const line = `[${new Date().toISOString()}] ${message}\n`;
-  fs.appendFileSync(CAPTURE_LOG, line, 'utf8');
+  logLine(CAPTURE_LOG, message);
+}
+
+function logExtract(message) {
+  logLine(EXTRACT_LOG, message);
 }
 
 function shouldDebounceConsolidate() {
@@ -232,59 +145,157 @@ function markConsolidateTriggered() {
   writeJsonAtomic(LAST_CONSOLIDATE_TRIGGER_PATH, { at: Date.now() });
 }
 
-function triggerBackgroundConsolidate() {
-  if (shouldDebounceConsolidate()) {
-    logConsolidate('skip: debounce');
-    return false;
+function countStage1() {
+  try {
+    return fs.readdirSync(STAGE1_DIR).filter((f) => f.endsWith('.json')).length;
+  } catch {
+    return 0;
   }
-  if (fs.existsSync(LOCK_PATH) && !isLockStale()) {
-    logConsolidate('skip: consolidate already running');
-    return false;
-  }
-  clearLock();
+}
 
-  ensureDirs();
-  fs.writeFileSync(LOCK_PATH, JSON.stringify({
-    pid: process.pid,
-    startedAt: new Date().toISOString(),
-    model: CONSOLIDATE_MODEL,
-  }), 'utf8');
+function runAgentSync({ prompt, model, workspace, addDirs = [], sandbox, logPath, label }) {
+  return new Promise((resolve) => {
+    const cursorBin = resolveCursorBinary();
+    const args = [
+      'agent', '-p', '--force',
+      '--model', model,
+      '--workspace', workspace,
+      '--sandbox', sandbox,
+      prompt,
+    ];
 
-  const prompt = [
-    'Consolidate pending memories.',
-    `Follow ${CONSOLIDATE_SKILL}.`,
-    `Process ${RAW_PATH} only.`,
-    `Write/update ${path.join(MEMORY_DIR, 'MEMORY.md')} and ${path.join(MEMORY_DIR, 'memory_summary.md')}.`,
-    'Promote repeatable workflows to ~/.cursor/skills/ only when clearly reusable.',
-    `Delete ${LOCK_PATH} when finished (success or failure).`,
-    'Do not store secrets. Merge duplicates aggressively.',
-  ].join(' ');
+    for (const dir of addDirs) {
+      args.splice(args.length - 1, 0, '--add-dir', dir);
+    }
 
+    const logFd = fs.openSync(logPath, 'a');
+    logLine(logPath, `${label} spawn model=${model} sandbox=${sandbox}`);
+
+    const child = spawn(cursorBin, args, {
+      stdio: ['ignore', logFd, logFd],
+      env: process.env,
+    });
+
+    child.on('close', (code) => {
+      try { fs.closeSync(logFd); } catch { /* ignore */ }
+      logLine(logPath, `${label} exit code=${code}`);
+      resolve(code === 0);
+    });
+
+    child.on('error', (err) => {
+      try { fs.closeSync(logFd); } catch { /* ignore */ }
+      logLine(logPath, `${label} error: ${err.message}`);
+      resolve(false);
+    });
+  });
+}
+
+function runAgentDetached({ prompt, model, workspace, addDirs = [], sandbox, logPath, label }) {
   const cursorBin = resolveCursorBinary();
-  const logFd = fs.openSync(CONSOLIDATE_LOG, 'a');
+  const args = [
+    'agent', '-p', '--force',
+    '--model', model,
+    '--workspace', workspace,
+    '--sandbox', sandbox,
+    prompt,
+  ];
+
+  for (const dir of addDirs) {
+    args.splice(args.length - 1, 0, '--add-dir', dir);
+  }
+
+  const logFd = fs.openSync(logPath, 'a');
 
   try {
-    const { spawn } = require('child_process');
-    const child = spawn(cursorBin, [
-      'agent', '-p', '--force', '--trust',
-      '--model', CONSOLIDATE_MODEL,
-      '--workspace', CURSOR_DIR,
-      prompt,
-    ], {
+    const child = spawn(cursorBin, args, {
       detached: true,
       stdio: ['ignore', logFd, logFd],
       env: process.env,
     });
     child.unref();
-    markConsolidateTriggered();
-    logConsolidate(`spawned consolidate agent model=${CONSOLIDATE_MODEL} pid=${child.pid}`);
+    logLine(logPath, `${label} spawned pid=${child.pid} model=${model} sandbox=${sandbox}`);
     return true;
   } catch (err) {
-    clearLock();
-    logConsolidate(`spawn failed: ${err.message}`);
     try { fs.closeSync(logFd); } catch { /* ignore */ }
+    logLine(logPath, `${label} spawn failed: ${err.message}`);
     return false;
   }
+}
+
+async function runBackgroundAgent(opts) {
+  if (opts.sync) {
+    return runAgentSync(opts);
+  }
+  return runAgentDetached(opts);
+}
+
+function readCaptureState() {
+  return readJson(CAPTURE_STATE_PATH, { sessions: {} });
+}
+
+function saveCaptureState(state) {
+  writeJsonAtomic(CAPTURE_STATE_PATH, state);
+}
+
+function clearExtractQueued(sessionId, reason) {
+  const state = readCaptureState();
+  const sessionState = state.sessions[sessionId];
+  if (!sessionState) return;
+  delete sessionState.extractQueued;
+  delete sessionState.extractQueuedAt;
+  sessionState.lastExtractStatus = reason;
+  sessionState.lastExtractAt = new Date().toISOString();
+  state.sessions[sessionId] = sessionState;
+  saveCaptureState(state);
+}
+
+function stage1OutputPath(sessionId) {
+  return path.join(STAGE1_DIR, `${sessionId}.json`);
+}
+
+function stage1LockPath(sessionId) {
+  return `${stage1OutputPath(sessionId)}.lock`;
+}
+
+function isExtractLockStale(lockPath) {
+  try {
+    const stat = fs.statSync(lockPath);
+    return Date.now() - stat.mtimeMs > EXTRACT_LOCK_STALE_MS;
+  } catch {
+    return true;
+  }
+}
+
+function clearExtractLock(sessionId) {
+  try { fs.unlinkSync(stage1LockPath(sessionId)); } catch { /* ignore */ }
+}
+
+function isExtractQueuedStale(sessionState) {
+  if (!sessionState?.extractQueuedAt) return true;
+  const queuedAt = Date.parse(sessionState.extractQueuedAt);
+  if (Number.isNaN(queuedAt)) return true;
+  return Date.now() - queuedAt > EXTRACT_QUEUED_STALE_MS;
+}
+
+function isExtractInProgress(sessionId, sessionState) {
+  const lockPath = stage1LockPath(sessionId);
+  if (fs.existsSync(stage1OutputPath(sessionId))) return false;
+  if (!fs.existsSync(lockPath)) return false;
+  return !isExtractLockStale(lockPath);
+}
+
+function recoverStaleExtract(sessionId, sessionState) {
+  const lockPath = stage1LockPath(sessionId);
+  if (fs.existsSync(lockPath) && isExtractLockStale(lockPath)) {
+    clearExtractLock(sessionId);
+    logCapture(`recovered stale extract lock session=${sessionId}`);
+  }
+  if (sessionState?.extractQueued && isExtractQueuedStale(sessionState)) {
+    clearExtractQueued(sessionId, 'stale-queued');
+    logCapture(`cleared stale extractQueued session=${sessionId}`);
+    return true;
+  }
+  return false;
 }
 
 function inferSessionId(input) {
@@ -310,7 +321,7 @@ function inferOutcome(input, hookEvent) {
   return 'unknown';
 }
 
-function shouldTriggerConsolidate(input, hookEvent) {
+function shouldTriggerExtract(input, hookEvent) {
   if (hookEvent === 'stop') {
     return input.status === 'completed';
   }
@@ -320,9 +331,90 @@ function shouldTriggerConsolidate(input, hookEvent) {
   return false;
 }
 
+function triggerBackgroundExtract({ transcriptPath, sessionId, cwd, outcome }) {
+  const runner = path.join(CURSOR_DIR, 'hooks', 'memory-extract-runner.js');
+  const args = [
+    runner,
+    '--transcript', transcriptPath,
+    '--session', sessionId,
+    '--cwd', cwd,
+    '--outcome', outcome,
+  ];
+
+  try {
+    const child = spawn(process.execPath, args, {
+      detached: true,
+      stdio: 'ignore',
+      env: process.env,
+    });
+    child.unref();
+    logCapture(`spawned extract-runner session=${sessionId} pid=${child.pid}`);
+    return true;
+  } catch (err) {
+    logCapture(`extract-runner spawn failed session=${sessionId}: ${err.message}`);
+    return false;
+  }
+}
+
+function triggerBackgroundConsolidate() {
+  if (shouldDebounceConsolidate()) {
+    logConsolidate('skip: debounce');
+    return false;
+  }
+  if (fs.existsSync(LOCK_PATH) && !isLockStale()) {
+    logConsolidate('skip: consolidate already running');
+    return false;
+  }
+  clearLock();
+
+  ensureDirs();
+  fs.writeFileSync(LOCK_PATH, JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    model: MEMORY_MODEL,
+  }), 'utf8');
+
+  const runner = path.join(CURSOR_DIR, 'hooks', 'memory-consolidate-runner.js');
+  try {
+    const child = spawn(process.execPath, [runner], {
+      detached: true,
+      stdio: 'ignore',
+      env: process.env,
+    });
+    child.unref();
+    markConsolidateTriggered();
+    logConsolidate(`spawned consolidate-runner pid=${child.pid} model=${MEMORY_MODEL} sandbox=${SANDBOX_MODE}`);
+    return true;
+  } catch (err) {
+    clearLock();
+    logConsolidate(`consolidate-runner spawn failed: ${err.message}`);
+    return false;
+  }
+}
+
+function maybeTriggerConsolidate(source) {
+  const stage1Count = countStage1();
+  const { hasChanges } = prepareWorkspaceDiff(MEMORY_DIR);
+
+  if (stage1Count < CONSOLIDATE_THRESHOLD) {
+    logConsolidate(`skip source=${source} stage1=${stage1Count}/${CONSOLIDATE_THRESHOLD}`);
+    return false;
+  }
+
+  if (!hasChanges) {
+    logConsolidate(`skip source=${source} stage1=${stage1Count} no workspace diff`);
+    return false;
+  }
+
+  logConsolidate(`trigger source=${source} stage1=${stage1Count} diff=true`);
+  return triggerBackgroundConsolidate();
+}
+
 function captureFromTranscript(input, hookEvent) {
   const transcriptPath = resolveTranscriptPath(input);
   const sessionId = inferSessionId(input);
+  const cwd = process.env.CURSOR_PROJECT_DIR || process.cwd();
+  const outcome = inferOutcome(input, hookEvent);
 
   if (!transcriptPath) {
     logCapture(`event=${hookEvent} session=${sessionId} skip: no transcript_path`);
@@ -335,76 +427,97 @@ function captureFromTranscript(input, hookEvent) {
   }
 
   const state = readCaptureState();
-  const sessionState = state.sessions[sessionId] || { lastLine: 0 };
-  const lines = parseTranscriptLines(transcriptPath);
-  const cwd = process.env.CURSOR_PROJECT_DIR || process.cwd();
-  const outcome = inferOutcome(input, hookEvent);
+  const sessionState = state.sessions[sessionId] || {};
 
-  let appended = 0;
-  let scanned = 0;
-  let lowScore = 0;
+  recoverStaleExtract(sessionId, sessionState);
 
-  for (let i = sessionState.lastLine; i < lines.length; i += 1) {
-    const parsed = parseTranscriptMessage(lines[i]);
-    if (!parsed) continue;
-    if (parsed.role !== 'user') continue;
-
-    scanned += 1;
-    const score = scoreCandidate(parsed.text, parsed.role);
-    if (score < 2) {
-      lowScore += 1;
-      continue;
-    }
-
-    appendRawEntry({
-      ts: new Date().toISOString(),
-      session_id: sessionId,
-      hook: hookEvent,
-      cwd,
-      task: parsed.text.slice(0, 120),
-      description: parsed.text.slice(0, 500),
-      keywords: extractKeywords(parsed.text),
-      score,
-      outcome,
-    });
-    appended += 1;
+  if (isExtractInProgress(sessionId, sessionState)) {
+    logCapture(`event=${hookEvent} session=${sessionId} skip: extract in progress`);
+    return 0;
   }
 
-  sessionState.lastLine = lines.length;
-  sessionState.lastCaptureAt = new Date().toISOString();
-  state.sessions[sessionId] = sessionState;
-  saveCaptureState(state);
-
-  logCapture(
-    `event=${hookEvent} session=${sessionId} lines=${lines.length} `
-    + `new_user_msgs=${scanned} appended=${appended} low_score=${lowScore} pending=${countPending()}`
-  );
-
-  if (shouldTriggerConsolidate(input, hookEvent)) {
-    const pending = countPending();
-    if (pending >= CONSOLIDATE_THRESHOLD) {
-      logCapture(`event=${hookEvent} session=${sessionId} consolidate trigger pending=${pending}`);
-      triggerBackgroundConsolidate();
-    } else {
-      logCapture(`event=${hookEvent} session=${sessionId} consolidate skip pending=${pending}/${CONSOLIDATE_THRESHOLD}`);
-    }
+  if (sessionState.extractQueued && !isExtractQueuedStale(sessionState)) {
+    logCapture(`event=${hookEvent} session=${sessionId} skip: extract already queued`);
+    return 0;
   }
 
-  return appended;
+  if (sessionState.extractQueued && isExtractQueuedStale(sessionState)) {
+    clearExtractQueued(sessionId, 'stale-retry');
+    logCapture(`event=${hookEvent} session=${sessionId} retry: stale extractQueued cleared`);
+  }
+
+  if (!shouldTriggerExtract(input, hookEvent)) {
+    logCapture(`event=${hookEvent} session=${sessionId} skip: session not completed`);
+    return 0;
+  }
+
+  const existingStage1 = path.join(STAGE1_DIR, `${sessionId}.json`);
+  if (fs.existsSync(existingStage1)) {
+    logCapture(`event=${hookEvent} session=${sessionId} skip: already extracted`);
+    maybeTriggerConsolidate(hookEvent);
+    return 0;
+  }
+
+  try {
+    const raw = fs.readFileSync(transcriptPath, 'utf8');
+    if (shouldSkipTranscript(raw)) {
+      logCapture(`event=${hookEvent} session=${sessionId} skip: transcript guard`);
+      return 0;
+    }
+  } catch {
+    logCapture(`event=${hookEvent} session=${sessionId} skip: cannot read transcript`);
+    return 0;
+  }
+
+  const queued = triggerBackgroundExtract({ transcriptPath, sessionId, cwd, outcome });
+  if (queued) {
+    sessionState.extractQueued = true;
+    sessionState.extractQueuedAt = new Date().toISOString();
+    state.sessions[sessionId] = sessionState;
+    saveCaptureState(state);
+  }
+
+  logCapture(`event=${hookEvent} session=${sessionId} extract_queued=${queued} stage1=${countStage1()}`);
+  return queued ? 1 : 0;
 }
 
 module.exports = {
   CAPTURE_STATE_PATH,
-  CONSOLIDATE_MODEL,
+  CAPTURE_LOG,
+  CONSOLIDATE_SKILL,
   CONSOLIDATE_THRESHOLD,
+  CURSOR_DIR,
+  EXTRACT_LOG,
+  EXTRACT_SKILL,
+  EXTRACT_LOCK_STALE_MS,
+  EXTRACT_QUEUED_STALE_MS,
+  MEMORY_MODEL,
   LOCK_PATH,
   MEMORY_DIR,
-  RAW_PATH,
-  appendRawEntry,
+  SANDBOX_MODE,
+  archiveConsolidatedStage1,
   captureFromTranscript,
-  countPending,
+  clearExtractLock,
+  clearExtractQueued,
+  countStage1,
+  isExtractInProgress,
+  isExtractLockStale,
+  isExtractQueuedStale,
+  logCapture,
+  logConsolidate,
+  logExtract,
+  maybeTriggerConsolidate,
+  readCaptureState,
   readMemorySummary,
   readStdin,
-  shouldTriggerConsolidate,
+  recoverStaleExtract,
+  resetGitBaseline,
+  resolveCursorBinary,
+  runBackgroundAgent,
+  saveCaptureState,
+  stage1LockPath,
+  stage1OutputPath,
+  syncRawMemoriesMd,
   triggerBackgroundConsolidate,
+  triggerBackgroundExtract,
 };

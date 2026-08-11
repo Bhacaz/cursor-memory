@@ -1,43 +1,49 @@
 ---
 name: memory-consolidate
 description: >-
-  Merge pending raw memory captures into durable MEMORY.md and memory_summary.md.
-  Use only when explicitly asked to consolidate memories or when invoked by the
-  memory capture hook background job.
+  Phase 2: merge stage-1 extractions into durable MEMORY.md and memory_summary.md
+  using git workspace diff. Invoked by background consolidate runner only.
 disable-model-invocation: true
 ---
 
-# Memory consolidate
+# Memory consolidate (Phase 2)
 
-Background maintenance job. Process **only** high-signal pending captures.
+Background maintenance. Integrate new extractions into durable artifacts.
 
-## Inputs
+## Primary input
 
-- Raw queue: `~/.cursor/memory/raw/pending.jsonl`
-- Current registry: `~/.cursor/memory/MEMORY.md`
-- Current summary: `~/.cursor/memory/memory_summary.md` (line 1 must be `v1`)
+- `~/.cursor/memory/phase2_workspace_diff.md` — git diff since last baseline
+- Read this first to find what changed (INCREMENTAL mode)
+
+## Also read
+
+- `raw_memories.md` — merged stage-1 outputs
+- `MEMORY.md` — current registry
+- `memory_summary.md` — must start with `v1`
+- `rollout_summaries/*.md` — per-rollout evidence
+- `~/.cursor/skills/*` — existing promoted procedures
 
 ## Procedure
 
-1. Read all lines in `pending.jsonl`. Skip entries with `score < 2`.
-2. For each surviving entry, decide:
-   - **Fact/preference** → merge bullet into `MEMORY.md` under `preferences`, `projects` (use `cwd`), or `procedures`
-   - **Rich run history** → write `~/.cursor/memory/rollout_summaries/<YYYY-MM-DD>-<slug>.md` and link from registry
-   - **Repeatable workflow** (same pattern ≥2 entries or explicit "make skill") → create/update `~/.cursor/skills/<name>/SKILL.md`
-3. Merge duplicates aggressively — one canonical bullet per fact
+1. Read `phase2_workspace_diff.md` — focus on added/changed `raw_memories.md` and `rollout_summaries/` entries first.
+2. For each new/changed raw memory:
+   - **Fact/preference** → merge bullet into `MEMORY.md` under `preferences`, `projects` (tag by `cwd`), or `procedures`
+   - **Rich run history** → ensure `rollout_summaries/<slug>.md` exists; link from registry
+   - **Repeatable workflow** (≥2 similar patterns or explicit "make skill") → create/update `~/.cursor/skills/<name>/SKILL.md`
+3. Merge duplicates aggressively — one canonical bullet per fact.
 4. Update `memory_summary.md`:
    - Must start with exact line `v1`
    - Keep 1–2 screens max — navigational keywords + pointers only
    - Regenerate completely if missing or not `v1`
-5. Move processed lines to `~/.cursor/memory/raw/processed/<timestamp>.jsonl` (or delete if empty run)
-6. Write `~/.cursor/memory/state/last-consolidate.json` with `{ "at": "<iso>", "processed": N }`
-7. **Always** delete `~/.cursor/memory/state/consolidate.lock` when done
+5. Deletion hygiene: if diff shows removed rollout summaries, remove `MEMORY.md` bullets supported only by deleted evidence.
+6. Do **not** archive stage-1 files or reset git — the runner handles that after you finish.
 
 ## High signal (keep)
 
 - Reusable prefs, repo conventions, proven workflow shortcuts
-- User corrections ("use X not Y", "always", "never")
+- Implicit preferences inferred from user steering patterns
 - Failure shields that prevented repeat mistakes
+- Repo orientation, tooling quirks discovered during work
 
 ## Reject (drop)
 
@@ -63,9 +69,14 @@ disable-model-invocation: true
 ---
 ```
 
+## Scope (strict)
+
+- Write only under `~/.cursor/memory/` and `~/.cursor/skills/`
+- Do not run shell commands or access network
+- Do not read transcripts or spawn sub-agents
+
 ## Verification
 
 - [ ] `memory_summary.md` starts with `v1`
 - [ ] No secrets in any memory file
-- [ ] `pending.jsonl` empty or only unprocessed high-signal lines remain
-- [ ] `consolidate.lock` removed
+- [ ] Diff-driven changes applied; no unrelated edits

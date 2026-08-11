@@ -11,6 +11,7 @@
     "install:cursor": "./install.sh",
     "uninstall:cursor": "./uninstall.sh",
     "test:session-start": "node src/hooks/memory-session-start.js",
-    "doctor": "./scripts/doctor.sh"
+    "doctor": "./scripts/doctor.sh",
+    "retry-extract": "node scripts/retry-extract.js"
   }
 }

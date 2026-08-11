@@ -13,6 +13,7 @@ disable-model-invocation: true
 
 - Summary (already injected at session start): `~/.cursor/memory/memory_summary.md`
 - Registry: `~/.cursor/memory/MEMORY.md`
+- Raw stage-1: `~/.cursor/memory/raw/stage1/` (pre-consolidation)
 - Evidence: `~/.cursor/memory/rollout_summaries/`
 - Procedures: `~/.cursor/skills/`
 

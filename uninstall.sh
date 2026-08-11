@@ -5,6 +5,21 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CURSOR_DIR="${CURSOR_DIR:-$HOME/.cursor}"
 KEEP_DATA=true
 
+MEMORY_HOOKS=(
+  memory-lib.js
+  memory-git.js
+  memory-session-start.js
+  memory-capture.js
+  memory-extract-runner.js
+  memory-consolidate-runner.js
+)
+
+MEMORY_SKILLS=(
+  memory-read
+  memory-extract
+  memory-consolidate
+)
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--purge-data]
@@ -29,7 +44,7 @@ echo "Uninstalling cursor-memory"
 
 node "$REPO_DIR/scripts/merge-hooks.js" uninstall
 
-for hook in memory-lib.js memory-session-start.js memory-capture.js; do
+for hook in "${MEMORY_HOOKS[@]}"; do
   target="$CURSOR_DIR/hooks/$hook"
   if [[ -L "$target" ]]; then
     rm "$target"
@@ -40,7 +55,7 @@ for hook in memory-lib.js memory-session-start.js memory-capture.js; do
   fi
 done
 
-for skill in memory-read memory-consolidate; do
+for skill in "${MEMORY_SKILLS[@]}"; do
   target="$CURSOR_DIR/skills/$skill"
   if [[ -e "$target" ]]; then
     rm -rf "$target"

@@ -28,11 +28,11 @@ check_link() {
   ok "$label"
 }
 
-for hook in memory-lib.js memory-session-start.js memory-capture.js; do
+for hook in memory-lib.js memory-git.js memory-session-start.js memory-capture.js memory-extract-runner.js memory-consolidate-runner.js; do
   check_link "$CURSOR_DIR/hooks/$hook" "hook $hook"
 done
 
-for skill in memory-read memory-consolidate; do
+for skill in memory-read memory-extract memory-consolidate; do
   check_link "$CURSOR_DIR/skills/$skill" "skill $skill"
 done
 
@@ -44,17 +44,34 @@ fi
 
 if command -v cursor >/dev/null 2>&1; then
   ok "cursor CLI: $(command -v cursor)"
+  if cursor agent models 2>/dev/null | grep -q 'gpt-5.6-luna'; then
+    ok "extract model gpt-5.6-luna available"
+  else
+    warn "gpt-5.6-luna not in cursor agent models — set MEMORY_MODEL"
+  fi
 else
-  warn "cursor CLI not on PATH — background consolidate will fail"
+  warn "cursor CLI not on PATH — background extract/consolidate will fail"
 fi
 
-if [[ -f "$MEMORY_DIR/raw/pending.jsonl" ]]; then
-  pending=$(grep -c . "$MEMORY_DIR/raw/pending.jsonl" 2>/dev/null || echo 0)
+if command -v git >/dev/null 2>&1; then
+  ok "git: $(command -v git)"
 else
-  pending=0
+  warn "git not on PATH — workspace diff will fail"
+fi
+
+stage1=0
+stuck_locks=0
+if [[ -d "$MEMORY_DIR/raw/stage1" ]]; then
+  stage1=$(find "$MEMORY_DIR/raw/stage1" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+  stuck_locks=$(find "$MEMORY_DIR/raw/stage1" -maxdepth 1 -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')
 fi
 echo ""
-echo "pending captures: $pending (consolidate at ${MEMORY_CONSOLIDATE_THRESHOLD:-3})"
+echo "stage-1 extractions: $stage1 (consolidate at ${MEMORY_CONSOLIDATE_THRESHOLD:-3})"
+if [[ "$stuck_locks" -gt 0 ]]; then
+  warn "$stuck_locks stale extract lock(s) in raw/stage1 — run: npm run retry-extract -- --clear-stuck"
+fi
+echo "model: ${MEMORY_MODEL:-gpt-5.6-luna-medium}"
+echo "sandbox: ${MEMORY_SANDBOX:-enabled}"
 
 if [[ -f "$MEMORY_DIR/state/last-capture.json" ]]; then
   echo "last capture state:"
@@ -72,6 +89,12 @@ else
 fi
 
 echo ""
+if [[ -f "$MEMORY_DIR/state/extract.log" ]]; then
+  echo "extract.log (last 5):"
+  tail -5 "$MEMORY_DIR/state/extract.log"
+fi
+
+echo ""
 if [[ -f "$MEMORY_DIR/state/consolidate.log" ]]; then
   echo "consolidate.log (last 5):"
   tail -5 "$MEMORY_DIR/state/consolidate.log"
@@ -83,5 +106,5 @@ if [[ "$FAIL" -ne 0 ]]; then
   exit 1
 fi
 
-echo "Hooks look healthy. Memory only updates on high-signal user messages (always/never/remember/corrections)."
-echo "Test: tell agent 'always use pnpm not npm' then end chat — watch capture.log."
+echo "Hooks look healthy. Luna extracts memories from completed chats; consolidate runs at threshold with git diff."
+echo "Test: complete a coding chat, then watch extract.log and raw/stage1/."

@@ -34,6 +34,21 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+MEMORY_HOOKS=(
+  memory-lib.js
+  memory-git.js
+  memory-session-start.js
+  memory-capture.js
+  memory-extract-runner.js
+  memory-consolidate-runner.js
+)
+
+MEMORY_SKILLS=(
+  memory-read
+  memory-extract
+  memory-consolidate
+)
+
 install_file() {
   local src="$1"
   local dest="$2"
@@ -47,6 +62,10 @@ install_file() {
     ln -s "$src" "$dest"
     echo "linked $dest -> $src"
     return
+  fi
+
+  if [[ -L "$dest" ]]; then
+    rm -f "$dest"
   fi
 
   if [[ -f "$dest" ]]; then
@@ -74,8 +93,10 @@ install_path() {
     return
   fi
 
-  if [[ -d "$dest" ]]; then
-    echo "keep existing $dest"
+  if [[ -d "$dest" || -L "$dest" ]]; then
+    rm -rf "$dest"
+    cp -R "$src" "$dest"
+    echo "updated $dest"
     return
   fi
 
@@ -87,17 +108,17 @@ echo "Installing cursor-memory from $REPO_DIR"
 
 mkdir -p "$CURSOR_DIR/hooks" "$CURSOR_DIR/skills"
 
-for hook in memory-lib.js memory-session-start.js memory-capture.js; do
+for hook in "${MEMORY_HOOKS[@]}"; do
   install_file "$REPO_DIR/src/hooks/$hook" "$CURSOR_DIR/hooks/$hook"
 done
 
-for skill in memory-read memory-consolidate; do
+for skill in "${MEMORY_SKILLS[@]}"; do
   install_path "$REPO_DIR/skills/$skill" "$CURSOR_DIR/skills/$skill"
 done
 
-mkdir -p "$CURSOR_DIR/memory/raw/processed" "$CURSOR_DIR/memory/rollout_summaries" "$CURSOR_DIR/memory/state"
+mkdir -p "$CURSOR_DIR/memory/raw/stage1" "$CURSOR_DIR/memory/raw/processed" "$CURSOR_DIR/memory/rollout_summaries" "$CURSOR_DIR/memory/state"
 
-for template in memory_summary.md MEMORY.md; do
+for template in memory_summary.md MEMORY.md raw_memories.md; do
   dest="$CURSOR_DIR/memory/$template"
   if [[ ! -f "$dest" ]]; then
     cp "$REPO_DIR/templates/memory/$template" "$dest"

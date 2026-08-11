@@ -2,22 +2,27 @@
 
 Codex-style **persistent memory** for [Cursor](https://cursor.com) — user-global, local-only, powered by [hooks](https://cursor.com/docs/hooks).
 
-Captures high-signal facts from agent chats, consolidates them into Markdown, and injects a compact summary at every session start.
+Extracts learnings from agent transcripts with **GPT-5.6 Luna**, consolidates via git workspace diff, injects compact summary at every session start.
+
+See [docs/codex-memory-reference.md](docs/codex-memory-reference.md) for full Codex architecture reference.
 
 ## How it works
 
 ```
-sessionStart  → inject memory_summary.md into agent context
-stop/sessionEnd → score user transcript → append raw/pending.jsonl
-pending ≥ 3   → background `cursor agent -p --model composer-2.5` consolidates
+sessionStart     → inject memory_summary.md into agent context
+stop/sessionEnd  → spawn Luna extract (sandbox) on full transcript
+                 → write raw/stage1/<session>.json + rollout_summaries/
+                 → sync raw_memories.md + git diff
+stage1 ≥ 3       → spawn sandboxed consolidate agent on phase2_workspace_diff.md
+                 → update MEMORY.md + memory_summary.md → git baseline commit
 ```
 
 | Layer | Role |
 |-------|------|
 | **Read path** | `sessionStart` hook injects `memory_summary.md` |
-| **Capture** | Heuristic scoring on user messages (no LLM cost) |
-| **Consolidate** | Background Cursor CLI agent merges into `MEMORY.md` |
-| **Skills** | `memory-read` + `memory-consolidate` guide the agent |
+| **Extract (Phase 1)** | Luna (`gpt-5.6-luna-medium`) reads full transcript — explicit + implicit learnings |
+| **Consolidate (Phase 2)** | Sandboxed agent merges via git workspace diff |
+| **Skills** | `memory-read`, `memory-extract`, `memory-consolidate` |
 
 Inspired by the memory system in [openai/codex](https://github.com/openai/codex).
 
@@ -25,7 +30,8 @@ Inspired by the memory system in [openai/codex](https://github.com/openai/codex)
 
 - Cursor with hooks enabled
 - **Node.js** ≥ 18 (hooks run via `node`)
-- **`cursor` CLI** on PATH (`cursor agent …` for background consolidate)
+- **`cursor` CLI** on PATH (`cursor agent …` for background extract/consolidate)
+- **`git`** on PATH (workspace diff baseline)
 
 ## Install
 
@@ -46,6 +52,8 @@ Install copies into `~/.cursor/`:
 | hook entries | merged into `~/.cursor/hooks.json` |
 
 Existing `hooks.json` entries (e.g. caveman) are preserved — memory hooks are appended.
+
+Re-running `./install.sh` is safe: hooks and skills are refreshed; `MEMORY.md` and other memory data are never overwritten.
 
 ### Dev mode (symlink)
 
@@ -70,27 +78,32 @@ After install, data lives under **`~/.cursor/memory/`** (user-global, not per-pr
 
 ```
 ~/.cursor/memory/
-├── memory_summary.md       # line 1 must be "v1" — injected every session
-├── MEMORY.md               # searchable registry
+├── memory_summary.md           # line 1 must be "v1" — injected every session
+├── MEMORY.md                   # searchable registry
+├── raw_memories.md             # merged stage-1 outputs (Phase 2 input)
+├── phase2_workspace_diff.md    # git diff for consolidate (ephemeral)
+├── .git/                       # single-commit baseline for diffs
 ├── raw/
-│   ├── pending.jsonl       # captured high-signal snippets
-│   └── processed/          # archive after consolidation
-├── rollout_summaries/      # distilled run histories
+│   ├── stage1/<session>.json   # Luna extraction output
+│   └── processed/                # archive after consolidation
+├── rollout_summaries/          # per-rollout distilled evidence
 └── state/
-    ├── consolidate.log     # background job output
-    ├── consolidate.lock    # in-flight guard
-    └── last-capture.json   # transcript cursor per conversation
+    ├── capture.log
+    ├── extract.log
+    ├── consolidate.log
+    ├── consolidate.lock
+    └── last-capture.json
 ```
 
-Skills installed to `~/.cursor/skills/memory-read/` and `memory-consolidate/`.
+Skills installed to `~/.cursor/skills/memory-read/`, `memory-extract/`, `memory-consolidate/`.
 
 ## What gets captured
 
-**High signal** (score ≥ 2):
+**Phase 1 (Luna)** reads the full transcript and extracts:
 
-- User corrections — *"use pnpm not npm"*
-- Explicit prefs — *"always…"*, *"never…"*, *"remember…"*
-- Repeatable workflow hints
+- Explicit prefs — *"always…"*, *"never…"*, corrections
+- **Implicit learnings** — repeated steering, failure shields, repo orientation, tooling quirks
+- Task outcomes and rollout summaries
 
 **Rejected:**
 
@@ -98,32 +111,47 @@ Skills installed to `~/.cursor/skills/memory-read/` and `memory-consolidate/`.
 - Generic advice, one-off trivia
 - Embedded instruction blocks (`AGENTS.md`, skills, hooks)
 
+No-op when nothing would change future agent behavior.
+
 ## Consolidation
 
-When `pending.jsonl` reaches **3** entries and a chat completes, a **detached** agent runs:
+When `raw/stage1/` reaches **3** entries and git workspace is dirty after sync:
+
+1. Sync `raw_memories.md` from stage-1 JSON files
+2. Write `phase2_workspace_diff.md` (git diff vs baseline)
+3. Spawn **sandboxed** consolidate agent (Luna by default)
+4. Archive stage-1 files, commit new git baseline
+
+Runs outside your chat. Check `~/.cursor/memory/state/extract.log` and `consolidate.log`.
+
+### Manual retry (stuck extract)
+
+If extract wedges on stale lock or `extractQueued`:
 
 ```bash
-cursor agent -p --force --trust --model composer-2.5 --workspace ~/.cursor \
-  "Consolidate pending memories per ~/.cursor/skills/memory-consolidate/SKILL.md …"
+npm run retry-extract -- --clear-stuck
+npm run retry-extract -- --session <conversation-id> [--cwd <project-dir>]
 ```
 
-Runs outside your chat — no follow-up message spam. Check `~/.cursor/memory/state/consolidate.log` for progress.
-
-### Manual consolidate
 
 ```bash
-cursor agent -p --model composer-2.5 --trust --workspace ~/.cursor \
+cursor agent -p --sandbox enabled --model gpt-5.6-luna-medium --workspace ~/.cursor/memory \
   "Consolidate pending memories per ~/.cursor/skills/memory-consolidate/SKILL.md"
+```
+
+Or run the runner directly:
+
+```bash
+node ~/.cursor/hooks/memory-consolidate-runner.js
 ```
 
 ## Configuration
 
-Environment variables (optional):
-
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMORY_CONSOLIDATE_THRESHOLD` | `3` | Pending entries before consolidate |
-| `MEMORY_CONSOLIDATE_MODEL` | `composer-2.5` | Model for background consolidate |
+| `MEMORY_MODEL` | `gpt-5.6-luna-medium` | Model for extract + consolidate |
+| `MEMORY_CONSOLIDATE_THRESHOLD` | `3` | Stage-1 files before consolidate |
+| `MEMORY_SANDBOX` | `enabled` | Sandbox mode for background agents |
 | `MEMORY_CONSOLIDATE_DEBOUNCE_MS` | `60000` | Min ms between consolidate spawns |
 | `MEMORY_LOCK_STALE_MS` | `1800000` | Stale lock timeout (30 min) |
 | `MEMORY_CURSOR_BIN` | auto-detect | Path to `cursor` binary |
@@ -133,29 +161,39 @@ Set in shell profile or wrap hook commands if needed.
 ## Verify
 
 1. Open a **new** agent chat — memory summary should appear in context.
-2. Say something high-signal: *"always use pnpm not npm"*.
-3. Complete the chat — check `~/.cursor/memory/raw/pending.jsonl`.
-4. After 3 captures — `consolidate.log` should show a spawn line.
+2. Complete a coding chat with reusable learnings.
+3. Check `~/.cursor/memory/state/extract.log` and `raw/stage1/`.
+4. After 3 extractions — `consolidate.log` should show a spawn line.
 5. Cursor **Customize → Hooks** tab + Hooks output channel for debug.
+
+```bash
+./scripts/doctor.sh
+```
 
 ## Repository structure
 
 ```
 cursor-memory/
 ├── README.md
+├── docs/codex-memory-reference.md   # Codex architecture reference
 ├── install.sh / uninstall.sh
-├── hooks.fragment.json     # reference hook entries
+├── hooks.fragment.json
 ├── package.json
-├── src/hooks/                # runtime hook scripts
+├── src/hooks/
 │   ├── memory-lib.js
+│   ├── memory-git.js
 │   ├── memory-session-start.js
-│   └── memory-capture.js
+│   ├── memory-capture.js
+│   ├── memory-extract-runner.js
+│   └── memory-consolidate-runner.js
 ├── scripts/
-│   └── merge-hooks.js        # install/uninstall hooks.json merge
+│   ├── merge-hooks.js
+│   └── doctor.sh
 ├── skills/
 │   ├── memory-read/
+│   ├── memory-extract/
 │   └── memory-consolidate/
-└── templates/memory/         # starter Markdown files
+└── templates/memory/
 ```
 
 ## Hook entries added
@@ -170,42 +208,33 @@ See `hooks.fragment.json`. Merged into your existing `~/.cursor/hooks.json`:
 
 ### Nothing updates after moving the repo
 
-`./install.sh --link` creates symlinks to this repo. **Moving the folder breaks them** — hooks fail silently.
+`./install.sh --link` creates symlinks. **Moving the folder breaks them.**
 
 ```bash
-cd ~/Documents/code/cursor-memory   # your current path
+cd ~/Documents/code/cursor-memory
 ./install.sh --link
 ./scripts/doctor.sh
 ```
 
 ### Memory files not growing
 
-Normal chats **do not** auto-save. Capture only runs on **high-signal** user text:
+Extraction runs on **completed** chats only, via Luna on full transcript.
 
-- *"always …"*, *"never …"*, *"remember …"*
-- Corrections: *"use pnpm not npm"*, *"no, do X instead"*
-
-Then:
-
-1. Raw queue: `~/.cursor/memory/raw/pending.jsonl` (one line per capture)
-2. Consolidate runs at **3** pending entries when chat completes
+1. Stage-1 queue: `~/.cursor/memory/raw/stage1/*.json`
+2. Consolidate at **3** stage-1 files when git diff is dirty
 3. `MEMORY.md` updates only after consolidate
 
-Check hook activity:
-
 ```bash
-tail -f ~/.cursor/memory/state/capture.log
+tail -f ~/.cursor/memory/state/extract.log
 ```
 
-If you see `skip: no transcript_path`, transcripts may be disabled in Cursor settings.
+If you see `skip: no transcript_path`, enable transcripts in Cursor settings.
 
 ### Doctor
 
 ```bash
 ./scripts/doctor.sh
 ```
-
-Checks symlinks, hook smoke test, pending count, recent logs.
 
 ## License
 
