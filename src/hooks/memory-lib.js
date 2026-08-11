@@ -18,6 +18,7 @@ const STAGE1_DIR = path.join(MEMORY_DIR, 'raw', 'stage1');
 const PROCESSED_DIR = path.join(MEMORY_DIR, 'raw', 'processed');
 const STATE_DIR = path.join(MEMORY_DIR, 'state');
 const CAPTURE_STATE_PATH = path.join(STATE_DIR, 'last-capture.json');
+const TRANSCRIPT_INDEX_PATH = path.join(STATE_DIR, 'transcript-index.json');
 const LOCK_PATH = path.join(STATE_DIR, 'consolidate.lock');
 const CONSOLIDATE_LOG = path.join(STATE_DIR, 'consolidate.log');
 const CAPTURE_LOG = path.join(STATE_DIR, 'capture.log');
@@ -28,14 +29,21 @@ const EXTRACT_SKILL = path.join(CURSOR_DIR, 'skills', 'memory-extract', 'SKILL.m
 const MEMORY_MODEL = process.env.MEMORY_MODEL
   || process.env.MEMORY_EXTRACT_MODEL
   || process.env.MEMORY_CONSOLIDATE_MODEL
-  || 'gpt-5.6-luna-medium';
+  || 'gpt-5.6-luna-high';
 const CONSOLIDATE_THRESHOLD = Number(process.env.MEMORY_CONSOLIDATE_THRESHOLD || 3);
 const LOCK_STALE_MS = Number(process.env.MEMORY_LOCK_STALE_MS || 30 * 60 * 1000);
 const EXTRACT_LOCK_STALE_MS = Number(process.env.MEMORY_EXTRACT_LOCK_STALE_MS || 15 * 60 * 1000);
 const EXTRACT_QUEUED_STALE_MS = Number(process.env.MEMORY_EXTRACT_QUEUED_STALE_MS || 20 * 60 * 1000);
 const CONSOLIDATE_DEBOUNCE_MS = Number(process.env.MEMORY_CONSOLIDATE_DEBOUNCE_MS || 60 * 1000);
+const CAPTURE_MIN_TURNS = positiveInt(process.env.MEMORY_CAPTURE_MIN_TURNS, 10);
+const CAPTURE_MIN_MINUTES = positiveInt(process.env.MEMORY_CAPTURE_MIN_MINUTES, 120);
 const SANDBOX_MODE = process.env.MEMORY_SANDBOX || 'enabled';
 const LAST_CONSOLIDATE_TRIGGER_PATH = path.join(STATE_DIR, 'last-consolidate-trigger.json');
+
+function positiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function readStdin() {
   try {
@@ -230,11 +238,47 @@ async function runBackgroundAgent(opts) {
 }
 
 function readCaptureState() {
-  return readJson(CAPTURE_STATE_PATH, { sessions: {} });
+  return readJson(CAPTURE_STATE_PATH, {
+    sessions: {},
+    turnsSinceLastRun: 0,
+    lastRunAtMs: 0,
+  });
 }
 
 function saveCaptureState(state) {
   writeJsonAtomic(CAPTURE_STATE_PATH, state);
+}
+
+function readTranscriptIndex() {
+  const index = readJson(TRANSCRIPT_INDEX_PATH, { version: 1, transcripts: {} });
+  return index.version === 1 && index.transcripts
+    ? index
+    : { version: 1, transcripts: {} };
+}
+
+function isTranscriptAdvanced(transcriptPath, mtimeMs, index = readTranscriptIndex()) {
+  const entry = index.transcripts[path.resolve(transcriptPath)];
+  return !entry || mtimeMs > entry.mtimeMs;
+}
+
+function isDuplicateGeneration(input, sessionState) {
+  return Boolean(
+    input.generation_id
+    && input.generation_id === sessionState.lastProcessedGenerationId,
+  );
+}
+
+function markTranscriptProcessed(transcriptPath, mtimeMs, sessionId) {
+  const index = readTranscriptIndex();
+  for (const indexedPath of Object.keys(index.transcripts)) {
+    if (!fs.existsSync(indexedPath)) delete index.transcripts[indexedPath];
+  }
+  index.transcripts[path.resolve(transcriptPath)] = {
+    mtimeMs,
+    sessionId,
+    processedAt: new Date().toISOString(),
+  };
+  writeJsonAtomic(TRANSCRIPT_INDEX_PATH, index);
 }
 
 function clearExtractQueued(sessionId, reason) {
@@ -321,21 +365,26 @@ function inferOutcome(input, hookEvent) {
   return 'unknown';
 }
 
-function shouldTriggerExtract(input, hookEvent) {
-  if (hookEvent === 'stop') {
-    return input.status === 'completed';
-  }
-  if (hookEvent === 'sessionEnd') {
-    return true;
-  }
-  return false;
+function shouldCountTurn(input, hookEvent) {
+  return hookEvent === 'stop'
+    && input.status === 'completed'
+    && (input.loop_count ?? 0) === 0;
 }
 
-function triggerBackgroundExtract({ transcriptPath, sessionId, cwd, outcome }) {
+function isCadenceReady(state, now = Date.now()) {
+  const minutesSinceLastRun = state.lastRunAtMs
+    ? (now - state.lastRunAtMs) / 60_000
+    : Number.POSITIVE_INFINITY;
+  return state.turnsSinceLastRun >= CAPTURE_MIN_TURNS
+    && minutesSinceLastRun >= CAPTURE_MIN_MINUTES;
+}
+
+function triggerBackgroundExtract({ transcriptPath, transcriptMtimeMs, sessionId, cwd, outcome }) {
   const runner = path.join(CURSOR_DIR, 'hooks', 'memory-extract-runner.js');
   const args = [
     runner,
     '--transcript', transcriptPath,
+    '--transcript-mtime', String(transcriptMtimeMs),
     '--session', sessionId,
     '--cwd', cwd,
     '--outcome', outcome,
@@ -415,6 +464,22 @@ function captureFromTranscript(input, hookEvent) {
   const sessionId = inferSessionId(input);
   const cwd = process.env.CURSOR_PROJECT_DIR || process.cwd();
   const outcome = inferOutcome(input, hookEvent);
+  const state = readCaptureState();
+  const sessionState = state.sessions[sessionId] || {};
+  const now = Date.now();
+
+  if (isDuplicateGeneration(input, sessionState)) {
+    logCapture(`event=${hookEvent} session=${sessionId} skip: duplicate generation`);
+    return 0;
+  }
+  if (input.generation_id) {
+    sessionState.lastProcessedGenerationId = input.generation_id;
+  }
+  if (shouldCountTurn(input, hookEvent)) {
+    state.turnsSinceLastRun = (state.turnsSinceLastRun || 0) + 1;
+  }
+  state.sessions[sessionId] = sessionState;
+  saveCaptureState(state);
 
   if (!transcriptPath) {
     logCapture(`event=${hookEvent} session=${sessionId} skip: no transcript_path`);
@@ -426,8 +491,24 @@ function captureFromTranscript(input, hookEvent) {
     return 0;
   }
 
-  const state = readCaptureState();
-  const sessionState = state.sessions[sessionId] || {};
+  if (hookEvent === 'stop' && input.status !== 'completed') {
+    logCapture(`event=${hookEvent} session=${sessionId} skip: session not completed`);
+    return 0;
+  }
+
+  const transcriptMtimeMs = fs.statSync(transcriptPath).mtimeMs;
+  if (!isTranscriptAdvanced(transcriptPath, transcriptMtimeMs)) {
+    logCapture(`event=${hookEvent} session=${sessionId} skip: transcript already indexed`);
+    return 0;
+  }
+
+  if (!isCadenceReady(state, now)) {
+    logCapture(
+      `event=${hookEvent} session=${sessionId} skip: cadence `
+      + `turns=${state.turnsSinceLastRun || 0}/${CAPTURE_MIN_TURNS}`,
+    );
+    return 0;
+  }
 
   recoverStaleExtract(sessionId, sessionState);
 
@@ -446,11 +527,6 @@ function captureFromTranscript(input, hookEvent) {
     logCapture(`event=${hookEvent} session=${sessionId} retry: stale extractQueued cleared`);
   }
 
-  if (!shouldTriggerExtract(input, hookEvent)) {
-    logCapture(`event=${hookEvent} session=${sessionId} skip: session not completed`);
-    return 0;
-  }
-
   const existingStage1 = path.join(STAGE1_DIR, `${sessionId}.json`);
   if (fs.existsSync(existingStage1)) {
     logCapture(`event=${hookEvent} session=${sessionId} skip: already extracted`);
@@ -461,6 +537,10 @@ function captureFromTranscript(input, hookEvent) {
   try {
     const raw = fs.readFileSync(transcriptPath, 'utf8');
     if (shouldSkipTranscript(raw)) {
+      markTranscriptProcessed(transcriptPath, transcriptMtimeMs, sessionId);
+      state.turnsSinceLastRun = 0;
+      state.lastRunAtMs = now;
+      saveCaptureState(state);
       logCapture(`event=${hookEvent} session=${sessionId} skip: transcript guard`);
       return 0;
     }
@@ -469,10 +549,18 @@ function captureFromTranscript(input, hookEvent) {
     return 0;
   }
 
-  const queued = triggerBackgroundExtract({ transcriptPath, sessionId, cwd, outcome });
+  const queued = triggerBackgroundExtract({
+    transcriptPath,
+    transcriptMtimeMs,
+    sessionId,
+    cwd,
+    outcome,
+  });
   if (queued) {
     sessionState.extractQueued = true;
     sessionState.extractQueuedAt = new Date().toISOString();
+    state.turnsSinceLastRun = 0;
+    state.lastRunAtMs = now;
     state.sessions[sessionId] = sessionState;
     saveCaptureState(state);
   }
@@ -483,6 +571,8 @@ function captureFromTranscript(input, hookEvent) {
 
 module.exports = {
   CAPTURE_STATE_PATH,
+  CAPTURE_MIN_MINUTES,
+  CAPTURE_MIN_TURNS,
   CAPTURE_LOG,
   CONSOLIDATE_SKILL,
   CONSOLIDATE_THRESHOLD,
@@ -495,6 +585,7 @@ module.exports = {
   LOCK_PATH,
   MEMORY_DIR,
   SANDBOX_MODE,
+  TRANSCRIPT_INDEX_PATH,
   archiveConsolidatedStage1,
   captureFromTranscript,
   clearExtractLock,
@@ -503,9 +594,13 @@ module.exports = {
   isExtractInProgress,
   isExtractLockStale,
   isExtractQueuedStale,
+  isCadenceReady,
+  isDuplicateGeneration,
+  isTranscriptAdvanced,
   logCapture,
   logConsolidate,
   logExtract,
+  markTranscriptProcessed,
   maybeTriggerConsolidate,
   readCaptureState,
   readMemorySummary,
@@ -515,6 +610,7 @@ module.exports = {
   resolveCursorBinary,
   runBackgroundAgent,
   saveCaptureState,
+  shouldCountTurn,
   stage1LockPath,
   stage1OutputPath,
   syncRawMemoriesMd,

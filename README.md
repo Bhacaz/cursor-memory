@@ -10,7 +10,8 @@ See [docs/codex-memory-reference.md](docs/codex-memory-reference.md) for full Co
 
 ```
 sessionStart     → inject memory_summary.md into agent context
-stop/sessionEnd  → spawn Luna extract (sandbox) on full transcript
+stop/sessionEnd  → cadence + generation + transcript-mtime gates
+                 → spawn Luna extract (sandbox) on changed transcript
                  → write raw/stage1/<session>.json + rollout_summaries/
                  → sync raw_memories.md + git diff
 stage1 ≥ 3       → spawn sandboxed consolidate agent on phase2_workspace_diff.md
@@ -20,7 +21,7 @@ stage1 ≥ 3       → spawn sandboxed consolidate agent on phase2_workspace_dif
 | Layer | Role |
 |-------|------|
 | **Read path** | `sessionStart` hook injects `memory_summary.md` |
-| **Extract (Phase 1)** | Luna (`gpt-5.6-luna-medium`) reads full transcript — explicit + implicit learnings |
+| **Extract (Phase 1)** | Luna (`gpt-5.6-luna-high`) reads full transcript — explicit + implicit learnings |
 | **Consolidate (Phase 2)** | Sandboxed agent merges via git workspace diff |
 | **Skills** | `memory-read`, `memory-extract`, `memory-consolidate` |
 
@@ -91,6 +92,7 @@ After install, data lives under **`~/.cursor/memory/`** (user-global, not per-pr
     ├── capture.log
     ├── extract.log
     ├── consolidate.log
+    ├── transcript-index.json
     ├── consolidate.lock
     └── last-capture.json
 ```
@@ -110,8 +112,21 @@ Skills installed to `~/.cursor/skills/memory-read/`, `memory-extract/`, `memory-
 - Secrets / credentials / tokens
 - Generic advice, one-off trivia
 - Embedded instruction blocks (`AGENTS.md`, skills, hooks)
+- One-off bug investigations (single ticket, single component/API quirk, no reusable pattern)
 
 No-op when nothing would change future agent behavior.
+Repeatable workflows stay in memory; this system never creates skills automatically.
+
+## Capture cadence
+
+Extraction requires:
+
+- 10 completed top-level turns since the previous extraction
+- 120 minutes since the previous extraction
+- a transcript mtime newer than `state/transcript-index.json`
+
+Repeated `generation_id` hook events are ignored. Successful and no-op extractions
+both advance the transcript index; failed extractions remain retryable.
 
 ## Consolidation
 
@@ -135,7 +150,7 @@ npm run retry-extract -- --session <conversation-id> [--cwd <project-dir>]
 
 
 ```bash
-cursor agent -p --sandbox enabled --model gpt-5.6-luna-medium --workspace ~/.cursor/memory \
+cursor agent -p --sandbox enabled --model gpt-5.6-luna-high --workspace ~/.cursor/memory \
   "Consolidate pending memories per ~/.cursor/skills/memory-consolidate/SKILL.md"
 ```
 
@@ -149,8 +164,10 @@ node ~/.cursor/hooks/memory-consolidate-runner.js
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMORY_MODEL` | `gpt-5.6-luna-medium` | Model for extract + consolidate |
+| `MEMORY_MODEL` | `gpt-5.6-luna-high` | Model for extract + consolidate |
 | `MEMORY_CONSOLIDATE_THRESHOLD` | `3` | Stage-1 files before consolidate |
+| `MEMORY_CAPTURE_MIN_TURNS` | `10` | Completed top-level turns before extract |
+| `MEMORY_CAPTURE_MIN_MINUTES` | `120` | Minimum minutes between extracts |
 | `MEMORY_SANDBOX` | `enabled` | Sandbox mode for background agents |
 | `MEMORY_CONSOLIDATE_DEBOUNCE_MS` | `60000` | Min ms between consolidate spawns |
 | `MEMORY_LOCK_STALE_MS` | `1800000` | Stale lock timeout (30 min) |
@@ -218,11 +235,13 @@ cd ~/Documents/code/cursor-memory
 
 ### Memory files not growing
 
-Extraction runs on **completed** chats only, via Luna on full transcript.
+Extraction runs after the capture cadence is met, via Luna on the changed full transcript.
 
-1. Stage-1 queue: `~/.cursor/memory/raw/stage1/*.json`
-2. Consolidate at **3** stage-1 files when git diff is dirty
-3. `MEMORY.md` updates only after consolidate
+1. Capture state: `~/.cursor/memory/state/last-capture.json`
+2. Transcript index: `~/.cursor/memory/state/transcript-index.json`
+3. Stage-1 queue: `~/.cursor/memory/raw/stage1/*.json`
+4. Consolidate at **3** stage-1 files when git diff is dirty
+5. `MEMORY.md` updates only after consolidate
 
 ```bash
 tail -f ~/.cursor/memory/state/extract.log

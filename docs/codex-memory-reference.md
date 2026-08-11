@@ -30,7 +30,7 @@ Under `~/.codex/memories/` (Codex) or `~/.cursor/memory/` (cursor-memory):
 | `MEMORY.md` | Searchable handbook. Grep for keywords; richer than summary. |
 | `raw_memories.md` | Merged Phase 1 outputs. Input for Phase 2 consolidation. |
 | `rollout_summaries/<slug>.md` | Per-rollout distilled recap with preference signals, failures, references. |
-| `skills/<name>/SKILL.md` | Promoted reusable procedures. |
+| `skills/<name>/SKILL.md` | Codex may promote reusable procedures; cursor-memory never auto-creates skills. |
 | `phase2_workspace_diff.md` | Git diff since last successful consolidate (Phase 2 only). |
 | `.git/` | Single-commit baseline for workspace diff (not full history). |
 
@@ -138,9 +138,21 @@ If nothing durable worth saving, return all empty strings:
 ### High-signal categories
 
 1. **Stable user operating preferences** — corrections, repeated steering, defaults
-2. **High-leverage procedural knowledge** — shortcuts, failure shields, exact paths/commands
-3. **Task maps and decision triggers** — where truth lives, when to pivot
-4. **Durable environment/workflow facts** — tooling habits, repo conventions
+2. **Repo-wide conventions** — naming rules, migration patterns, enqueue scopes that recur
+3. **Task maps and decision triggers** — where truth lives, when to pivot (general, not ticket-specific)
+4. **Durable environment/workflow facts** — tooling habits applicable beyond one bug
+
+### Generality gate
+
+Before saving to registry, ask: *Would this help on a different task without this exact bug context?*
+
+| Verdict | Examples |
+|---------|----------|
+| **Promote to MEMORY.md** | "Sidekiq classes end with Job", "migration defaults belong in model", "always use Brave headed" |
+| **Rollout summary only** | Session audit useful for reference but not a default behavior change |
+| **Reject (no-op)** | Single API field mismatch, one component's bad data shape, one-ticket root cause |
+
+Ticket IDs alone do not make memory durable.
 
 ### Inference rules
 
@@ -230,7 +242,7 @@ Before agent runs:
 1. `MEMORY.md` — durable handbook blocks
 2. `rollout_summaries/*.md` — update if needed
 3. `memory_summary.md` — navigational index (must start `v1`)
-4. `skills/*` — promote only clearly reusable procedures
+4. `skills/*` — Codex only; cursor-memory disables automatic skill promotion
 
 ### After success
 
@@ -289,12 +301,13 @@ cursor-memory uses JSON state files + git dirtiness instead of a full DB.
 
 | Codex | cursor-memory v2 |
 |-------|------------------|
-| Phase 1 LLM extraction | `memory-extract-runner.js` + Luna (`gpt-5.6-luna-medium`) on `stop`/`sessionEnd` |
+| Phase 1 LLM extraction | Cadence-gated `memory-extract-runner.js` + Luna (`gpt-5.6-luna-high`) |
 | Heuristic pre-filter | `shouldSkip()` secret/instruction guard only |
 | State DB stage-1 store | `raw/stage1/<session_id>.json` |
 | `raw_memories.md` sync | `memory-git.js` `syncRawMemoriesMd()` |
 | Git workspace diff | `memory-git.js` `prepareWorkspaceDiff()` |
 | Phase 2 morpheus agent | Sandboxed `cursor agent` + `memory-consolidate` skill |
+| Skill promotion | Disabled; procedures remain in `MEMORY.md` or rollout summaries |
 | Read injection | `memory-session-start.js` hook |
 | Usage telemetry | Not yet — future: log grep hits |
 
@@ -303,6 +316,8 @@ cursor-memory uses JSON state files + git dirtiness instead of a full DB.
 ```
 sessionStart  → inject memory_summary.md
 stop/sessionEnd (completed)
+  → deduplicate generation_id
+  → require turn/time cadence + newer transcript mtime
   → spawn Luna extract (sandbox, read transcript via --add-dir)
   → write raw/stage1/<session>.json + rollout_summaries/<slug>.md
   → sync raw_memories.md
@@ -315,8 +330,10 @@ stop/sessionEnd (completed)
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `MEMORY_MODEL` | `gpt-5.6-luna-medium` | Phase 1 extraction + Phase 2 consolidation |
+| `MEMORY_MODEL` | `gpt-5.6-luna-high` | Phase 1 extraction + Phase 2 consolidation |
 | `MEMORY_CONSOLIDATE_THRESHOLD` | `3` | Min stage-1 files before consolidate |
+| `MEMORY_CAPTURE_MIN_TURNS` | `10` | Completed top-level turns before extraction |
+| `MEMORY_CAPTURE_MIN_MINUTES` | `120` | Minimum minutes between extractions |
 | `MEMORY_SANDBOX` | `enabled` | Sandbox mode for background agents |
 
 ---

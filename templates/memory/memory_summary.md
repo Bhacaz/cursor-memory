@@ -8,7 +8,7 @@ Navigational index. Full registry: `~/.cursor/memory/MEMORY.md`.
 
 - **preferences** — user workflow prefs (empty — populated by consolidation)
 - **projects** — per-repo notes tagged by cwd (empty)
-- **procedures** — pointers to `~/.cursor/skills/` (empty)
+- **procedures** — reusable workflows stored in memory (empty)
 
 ## Lookup
 

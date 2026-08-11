@@ -13,6 +13,7 @@ const {
   countStage1,
   isExtractLockStale,
   logExtract,
+  markTranscriptProcessed,
   maybeTriggerConsolidate,
   runBackgroundAgent,
   stage1LockPath,
@@ -24,6 +25,10 @@ function parseArgs() {
   const out = {};
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] === '--transcript' && args[i + 1]) { out.transcriptPath = args[++i]; continue; }
+    if (args[i] === '--transcript-mtime' && args[i + 1]) {
+      out.transcriptMtimeMs = Number(args[++i]);
+      continue;
+    }
     if (args[i] === '--session' && args[i + 1]) { out.sessionId = args[++i]; continue; }
     if (args[i] === '--cwd' && args[i + 1]) { out.cwd = args[++i]; continue; }
     if (args[i] === '--outcome' && args[i + 1]) { out.outcome = args[++i]; continue; }
@@ -41,6 +46,7 @@ function buildExtractPrompt({ transcriptPath, sessionId, cwd, outcome, outputPat
     `session_outcome_hint: ${outcome}`,
     `output_path: ${outputPath}`,
     'Read the transcript. Extract implicit and explicit learnings.',
+    'Apply the generality gate: skip one-off bug investigations; save only reusable prefs, conventions, and patterns.',
     'Write structured JSON to output_path exactly as specified in the skill.',
     'If rollout_summary is non-empty, also write rollout_summaries/<slug>.md under ~/.cursor/memory/.',
     'Do not consolidate. Do not edit MEMORY.md or memory_summary.md.',
@@ -48,7 +54,7 @@ function buildExtractPrompt({ transcriptPath, sessionId, cwd, outcome, outputPat
 }
 
 async function main() {
-  const { transcriptPath, sessionId, cwd, outcome } = parseArgs();
+  const { transcriptPath, transcriptMtimeMs, sessionId, cwd, outcome } = parseArgs();
   if (!transcriptPath || !sessionId) {
     logExtract('abort: missing transcript or session');
     process.exit(1);
@@ -59,6 +65,9 @@ async function main() {
     clearExtractQueued(sessionId, 'missing-transcript');
     process.exit(1);
   }
+  const processedMtimeMs = Number.isFinite(transcriptMtimeMs)
+    ? transcriptMtimeMs
+    : fs.statSync(transcriptPath).mtimeMs;
 
   const outputPath = stage1OutputPath(sessionId);
   const lockPath = stage1LockPath(sessionId);
@@ -120,6 +129,11 @@ async function main() {
   }
 
   if (!fs.existsSync(outputPath)) {
+    markTranscriptProcessed(
+      transcriptPath,
+      processedMtimeMs,
+      sessionId,
+    );
     logExtract(`noop: no output file session=${sessionId}`);
     clearExtractQueued(sessionId, 'noop');
     process.exit(0);
@@ -141,11 +155,21 @@ async function main() {
 
   if (!hasContent) {
     try { fs.unlinkSync(outputPath); } catch { /* ignore */ }
+    markTranscriptProcessed(
+      transcriptPath,
+      processedMtimeMs,
+      sessionId,
+    );
     logExtract(`noop session=${sessionId}`);
     clearExtractQueued(sessionId, 'noop');
     process.exit(0);
   }
 
+  markTranscriptProcessed(
+    transcriptPath,
+    processedMtimeMs,
+    sessionId,
+  );
   clearExtractQueued(sessionId, 'ok');
   logExtract(`ok session=${sessionId} stage1=${countStage1()}`);
   maybeTriggerConsolidate('extract-runner');

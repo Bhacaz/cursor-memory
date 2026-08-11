@@ -30,16 +30,16 @@ async function main() {
     `Primary diff input: ${diffPath}`,
     `Memory root: ${MEMORY_DIR}`,
     'Apply INCREMENTAL updates guided by the workspace diff.',
-    'Promote repeatable workflows to ~/.cursor/skills/ only when clearly reusable.',
+    'Promote only generic, reusable learnings to MEMORY.md; keep one-off bug investigations in rollout summaries or drop them.',
+    'Prune registry bullets that fail the generality gate.',
     'Merge duplicates aggressively. No secrets.',
-    'Do not modify files outside ~/.cursor/memory/ and ~/.cursor/skills/.',
+    'Do not modify files outside ~/.cursor/memory/.',
   ].join(' ');
 
   const ok = await runBackgroundAgent({
     prompt,
     model: MEMORY_MODEL,
     workspace: MEMORY_DIR,
-    addDirs: [path.join(require('os').homedir(), '.cursor', 'skills')],
     sandbox: SANDBOX_MODE,
     logPath: path.join(MEMORY_DIR, 'state', 'consolidate.log'),
     label: 'consolidate',

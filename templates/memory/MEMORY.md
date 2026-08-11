@@ -12,4 +12,4 @@ Searchable handbook. Consolidation appends here. Each entry: `- **[topic]** desc
 
 ## procedures
 
-<!-- links to ~/.cursor/skills/ or rollout_summaries/ -->
+<!-- reusable workflows or links to rollout_summaries/; registry = generic conventions only, not one-off bugs -->

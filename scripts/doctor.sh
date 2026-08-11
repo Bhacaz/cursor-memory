@@ -70,7 +70,7 @@ echo "stage-1 extractions: $stage1 (consolidate at ${MEMORY_CONSOLIDATE_THRESHOL
 if [[ "$stuck_locks" -gt 0 ]]; then
   warn "$stuck_locks stale extract lock(s) in raw/stage1 — run: npm run retry-extract -- --clear-stuck"
 fi
-echo "model: ${MEMORY_MODEL:-gpt-5.6-luna-medium}"
+echo "model: ${MEMORY_MODEL:-gpt-5.6-luna-high}"
 echo "sandbox: ${MEMORY_SANDBOX:-enabled}"
 
 if [[ -f "$MEMORY_DIR/state/last-capture.json" ]]; then
